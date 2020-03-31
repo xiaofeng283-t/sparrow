@@ -3,7 +3,6 @@ from flask import Flask,Blueprint,redirect,url_for,make_response,request
 from module import db_op,loging,Md5,tools
 import redis
 import time
-import os
 from sso_cas import CASClient
 from flask_sqlalchemy import SQLAlchemy
 import conf

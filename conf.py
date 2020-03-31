@@ -21,7 +21,6 @@ class FlaskEchartsEnvironment(Environment):
 def js_files():
     js = Bundle('js/jquery.cookie.js',
                 'js/jquery.SuperSlide.js',
-                'js/menu.js',
                 'js/autocomplete.js',
                 'js/spop.js',
                 'js/function.js',
@@ -34,6 +33,8 @@ def js_files():
                 'js/dynamics.js',
                 'js/zh.js',
                 'js/jquery.step.min.js',
+                'js/jquery-rvnm.js',
+                'js/botui.min.js',
                 filters='jsmin',
                 output='js/js_packed.js'
                 )
@@ -43,13 +44,16 @@ def css_files():
     css = Bundle('css/material_blue.css',
                 'css/mstyle.css',
                 'css/style.css',
-                'css/menu.css',
                 'css/spop.css',
                 'css/fishBone.css',
                 'css/buttons.css',
                 'css/radar.css',
                 'css/font-awesome.min.css',
+                'css/jquery-rvnm.css',
                 'css/jquery.step.css',
+                'css/botui.min.css',
+                'css/botui-theme-default.css',
+                'css/mimic.css',
                 filters='cssmin',
                 output='css/css_packed.css'
                 )

@@ -5,11 +5,13 @@ from flask import Flask
 from kubernetes import client
 from collections import defaultdict
 from flask_sqlalchemy import SQLAlchemy
-import time
+import time,datetime
 from tcpping import tcpping
 import redis
 from functools import reduce
 from pyecharts import Line
+from importlib import reload
+from sqlalchemy import desc,and_
 app = Flask(__name__)
 DB = SQLAlchemy(app)
 app.config.from_pyfile('../conf/redis.conf')
@@ -28,14 +30,14 @@ def pods():
     namespace = []
     image = []
     phases = []
+    tables = ('POD_NAME','创建日期', 'POD_IP', 'POD_PORTS', 'namespace', 'containers', 'NODE', '镜像地址','状态','管理')
+    keys = ('start_time','pod_ip','ports', 'namespace', 'container', 'node_name','image','phase')
     ret = v1.list_pod_for_all_namespaces()
     for i in ret.items:
         phase = 'unknown'
         pod_ports = 'None'
         try:
             podports = []
-            tables = ('POD_NAME','POD_IP','POD_PORTS','namespace','containers','NODE','镜像地址','状态','管理')
-            keys = ('pod_ip','ports','namespace','container','node_name','image','phase')
             if i.spec.containers[0].ports:
                 for ports in i.spec.containers:
                     if ports.ports:
@@ -55,6 +57,12 @@ def pods():
                         phase = i.status.container_statuses[-1].state.waiting.reason
         except Exception as e:
             logging.error(e)
+        start_time = i.status.start_time
+        try:
+            start_time = start_time + datetime.timedelta(hours=8)
+            start_time = start_time.strftime('%Y-%m-%d %H:%M:%S')
+        except Exception as e:
+            logging.error(e)
         try:
             valus[i.metadata.name] = {'pod_ip':i.status.pod_ip,
                                     'namespace':i.metadata.namespace,
@@ -62,7 +70,8 @@ def pods():
                                      'container':len(i.spec.containers),
                                     'image':';'.join([images.image for images in i.spec.containers]),
                                     'phase':phase,
-                                    'ports':pod_ports
+                                    'ports':pod_ports,
+                                    'start_time':start_time
                                     }
         except Exception as e:
             logging.error(e)
@@ -113,9 +122,9 @@ def deployment():
 
             except Exception as e:
                 logging.error(e)
+        return render_template('k8s-resource.html', valus=valus, tables=tables, keys=keys, resource='Deployment')
     except Exception as e:
         logging.error(e)
-    return render_template('k8s-resource.html',valus=valus,tables=tables,keys=keys,resource='Deployment')
 
 @page_k8s.route('/k8s/daemonset')
 def daemonset():
@@ -151,9 +160,9 @@ def daemonset():
                 }
             except Exception as e:
                 logging.error(e)
+        return render_template('k8s-resource.html', valus=valus, tables=tables, keys=keys, resource='Daemonset')
     except Exception as e:
         logging.error(e)
-    return render_template('k8s-resource.html',valus=valus,tables=tables,keys=keys,resource='Daemonset')
 
 @page_k8s.route('/k8s/service')
 def service():
@@ -211,58 +220,71 @@ def ingress():
 @page_k8s.route('/k8s/hpa')
 def hpa():
     try:
-        td = time.strftime("%Y-%m-%d", time.localtime())
+        reload(MyForm)
+        form = MyForm.FormData()
+        td = time.strftime('%Y-%m-%d',time.localtime())
+        if 'select_date' in request.cookies:
+            td = request.cookies['select_date']
         valus = []
+        line = None
         db_k8s_deploy = db_op.k8s_deploy
         db_project = db_op.project_list
         Key = 'op_k8s_ingress_log'
         keys = tables = ('name','deployment','最大副本','最小副本', '当前副本', 'CPU阀值','CPU当前值','QPS当前值','管理')
+        config.load_kube_config(config_file, g.context)
         v1 = client.AutoscalingV1Api()
         ret = v1.list_horizontal_pod_autoscaler_for_all_namespaces()
         for i in ret.items:
+            rps = 0
+            RPS = []
             try:
-                rps = 0
-                RPS = []
-                project = db_k8s_deploy.query.with_entities(db_k8s_deploy.project).filter(db_k8s_deploy.deployment==i.spec.scale_target_ref.name).limit(1).all()
+                project = db_k8s_deploy.query.with_entities(db_k8s_deploy.project).filter(and_(
+                    db_k8s_deploy.deployment==i.spec.scale_target_ref.name,db_k8s_deploy.context==g.context)).limit(1).all()
                 if project:
                     domains = db_project.query.with_entities(db_project.domain).filter(db_project.project==project[0][0]).limit(1).all()
-                    if domains[0][0]:
-                        for domain in domains[0][0].split(','):
-                            vals = RC.hgetall('%s_%s_%s' % (Key, domain, td))
-                            vals = sorted(vals.items(), key=lambda item: item[0])
-                            if vals:
-                                RPS.append(int(int(vals[-1][-1])/60))
-                        if RPS:
-                            rps = RPS[0]
-                            if len(RPS) >1:
-                                rps = reduce(lambda x,y:x+y,RPS)
-                    valus.append([i.metadata.name,
-                                 i.spec.scale_target_ref.name,
-                                 i.spec.max_replicas,
-                                 i.spec.min_replicas,
-                                 i.status.current_replicas,
-                                 '{0}%'.format(i.spec.target_cpu_utilization_percentage),
-                                 '{0}%'.format(i.status.current_cpu_utilization_percentage),
-                                  rps]
-                                 )
+                    if domains:
+                        domains = [domain[0] for domain in domains if domain]
+                        if domains[0]:
+                            for domain in domains[0].split(','):
+                                vals = RC.hgetall('%s_%s_%s' % (Key, domain, td))
+                                vals = sorted(vals.items(), key=lambda item: item[0])
+                                if vals:
+                                    RPS.append(int(int(vals[-1][-1])/60))
+                            if RPS:
+                                rps = RPS[0]
+                                if len(RPS) >1:
+                                    rps = reduce(lambda x,y:x+y,RPS)
             except Exception as e:
                 logging.error(e)
-        td = time.strftime('%Y-%m-%d', time.localtime())
-        Key = 'op_hpa_chart_%s_%s' % (g.context,td)
-        infos = RC.hgetall(Key)
-        infos = sorted(infos.items(), key=lambda item: item[0].split('_')[-1])
-        line = Line('HPA动态伸缩实时状态', width='110%', height='250px', title_pos='8%', title_text_size=14)
-        for project in valus:
-            attr = []
-            vals = []
-            for info in infos:
-                if project[0] in info[0]:
-                    attr.append(str(info[0].split('_')[-1]))
-                    vals.append(int(info[1]))
-            line.add(project[0], attr, vals, is_toolbox_show=False, is_smooth=True, mark_point=["max", "min"],
-                  mark_point_symbolsize=60,legend_pos='40%',is_datazoom_show=True, datazoom_range=[v for v in range(100, 10)],
-                             datazoom_type='both',)
-        return render_template('k8s-resource.html', valus=valus, tables=tables, keys=keys, line=line, resource='HPA')
+            try:
+                valus.append([i.metadata.name,
+                             i.spec.scale_target_ref.name,
+                             i.spec.max_replicas,
+                             i.spec.min_replicas,
+                             i.status.current_replicas,
+                             '{0}%'.format(i.spec.target_cpu_utilization_percentage),
+                             '{0}%'.format(i.status.current_cpu_utilization_percentage),
+                              rps]
+                             )
+            except Exception as e:
+                logging.error(e)
+        if valus:
+            Key = 'op_hpa_chart_%s_%s' % (g.context,td)
+            infos = RC.hgetall(Key)
+            infos = sorted(infos.items(), key=lambda item: item[0].split('_')[-1])
+            line = Line('HPA动态伸缩实时状态', width='110%', height='250px', title_pos='8%', title_text_size=14)
+            for project in valus:
+                attr = []
+                vals = []
+                for info in infos:
+                    if project[0] in info[0]:
+                        attr.append(str(info[0].split('_')[-1]))
+                        vals.append(int(info[1]))
+                if attr and vals:
+                    line.add(project[0], attr, vals, is_toolbox_show=False, is_smooth=True, mark_point=["max", "min"],
+                          mark_point_symbolsize=60,legend_pos='20%',is_datazoom_show=True, datazoom_range=[v for v in range(100, 10)],
+                                     datazoom_type='both',)
+        return render_template('k8s-resource.html', valus=valus, tables=tables, keys=keys, line=line,form=form,resource='HPA')
     except Exception as e:
         logging.error(e)
 
@@ -292,24 +314,25 @@ def nodes(context=None):
             values = db_zabbix.query.with_entities(db_zabbix.cpu_load,db_zabbix.mem_use).filter(db_zabbix.hostname==i.metadata.name).all()
             if values:
                 cpu_load,mem_used = values[0]
-            lables = []
-            if 'deploy' in i.metadata.labels:
-                lables.append('deploy:%s' %i.metadata.labels['deploy'])
-            if 'project' in i.metadata.labels:
-                lables.append('project:%s' %i.metadata.labels['project'])
-            if lables:
-                lables = ','.join(lables)
-            else:
-                lables = 'None'
+            labels = {key:i.metadata.labels[key] for key in i.metadata.labels if key not in ('beta.kubernetes.io/arch',
+                                                                                             'beta.kubernetes.io/os',
+                                                                                             'kubernetes.io/hostname',
+                                                                                             'node-role.kubernetes.io/master')}
+            storage = None
+            if 'ephemeral-storage' in i.status.allocatable:
+                storage = '%iG' %round(int(i.status.allocatable['ephemeral-storage'])/1024/1024/1024)
+            memory = None
+            if 'memory' in i.status.allocatable:
+                memory = '%iG' %round(int(i.status.allocatable['memory'].split('Ki')[0])/1024/1024)
             NODES[i.metadata.name] = {
                 'node_type':node_type,
                 'flannel':flannel,
                 'cpu':i.status.allocatable['cpu'],
                 'cpu_load':'{0}%'.format(cpu_load),
-                'memory':i.status.allocatable['memory'],
+                'memory':memory,
                 'mem_used':'{0}%'.format(mem_used),
-                'storage':i.status.allocatable['ephemeral-storage'],
-                'lables': lables,
+                'storage':storage,
+                'lables': labels,
                 'version':i.status.node_info.kubelet_version,
                 'status':i.status.conditions[-1].type
             }
@@ -340,7 +363,7 @@ def endpoints():
                         for info in infos.addresses:
                             try:
                                 ip_header = '.'.join(str(info.ip).split('.')[:2])
-                                if '{}.'.format(ip_header) in ('172.16.','10.10.'):
+                                if '{}.'.format(ip_header) in ('',''):
                                     if tcpping(host=info.ip, port=infos.ports[0].port, timeout=3):
                                         Infos.append([info.ip,True])
                                     else:
@@ -356,6 +379,45 @@ def endpoints():
     except Exception as e:
         logging.error(e)
     return render_template('k8s-endpoints.html',VAULES=VAULES,tables=tables)
+
+@page_k8s.route('/k8s/events')
+def events():
+    tables=('datetime','kind','name','namespace','message','reason','type')
+    db_events = db_op.k8s_events
+    events = db_events.query.with_entities(db_events.date_time,db_events.kind,db_events.name,db_events.namespace,
+                                           db_events.message,db_events.reason,db_events.type).filter(
+        db_events.context==g.context).order_by(
+        desc(db_events.date_time)).limit(500).all()
+    return render_template('k8s_events.html',events=events,tables=tables)
+
+@page_k8s.route('/k8s/pv')
+def pv():
+    tables=('pv_name','storage','access_modes','server','path','pv_claim','status')
+    v1 = client.CoreV1Api()
+    ret = v1.list_persistent_volume()
+    pvs = defaultdict()
+    for i in ret.items:
+        val = []
+        try:
+            val.append(i.spec.capacity['storage'])
+            val.append(i.spec.access_modes[0])
+            if i.spec.glusterfs:
+                val.append(i.spec.glusterfs.endpoints)
+                val.append(i.spec.glusterfs.path)
+            if i.spec.nfs:
+                val.append(i.spec.nfs.server)
+                val.append(i.spec.nfs.path)
+            if i.spec.claim_ref:
+                val.append(i.spec.claim_ref.name)
+            else:
+                val.append(None)
+            val.append(i.status.phase)
+        except Exception as e:
+            logging.error(e)
+        else:
+            if val:
+                pvs[i.metadata.name] = val
+    return render_template('k8s_pv.html', pvs=pvs, tables=tables)
 
 @page_k8s.before_request
 @user_auth.login_required(grade=1)

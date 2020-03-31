@@ -54,6 +54,7 @@ def deployment_create():
     reload(MyForm)
     form = MyForm.FormK8sDeploy()
     mounts = defaultdict()
+    labels = defaultdict()
     if form.submit.data:
         context = form.contexts.data
         project = form.projects.data
@@ -68,43 +69,52 @@ def deployment_create():
         limit_mem = form.limit_mem.data
         domain = form.domain.data
         healthcheck = form.healthcheck.data
-        mount_path2 = form.mount_path2.data
-        mount_name2 = form.mount_name2.data
+        label_project=form.label_project.data
+        label_deploy = form.label_deploy.data
+        mount_path = form.mount_path.data
+        mount_name = form.mount_name.data
         sidecar = form.sidecar.data
+        docker_args = form.docker_args.data
+        if docker_args:
+            docker_args = docker_args.splitlines()
         run_args = form.run_args.data
         run_args = run_args.splitlines()
-        re_requests = {}
-        re_limits = {}
-        if mount_path2:
-            mounts[mount_path2] = mount_name2
+        re_requests = {'cpu': 1, 'memory':'2G'}
+        re_limits = {'cpu': 2, 'memory':'4G'}
+        if mount_path:
+            mounts[mount_path] = mount_name
+        if label_project:
+            labels['project'] = label_project
+        if label_project:
+            labels['deploy'] = label_deploy
         try:
-            if object and version and  container_port and replicas:
+            if object and version  and replicas:
                 if object.endswith('.war') or object.endswith('.tar.gz') or object.endswith('.jar'):
                     dm_name = object.split('.')[0]
-                    image = "%s/%s:%s" %(docker_registry,dm_name,version)
+                    image = "%s/%s/%s:%s" %(docker_registry[context],context,dm_name,version)
                     docker_file = "%s/%s" %(dockerfile_path,dm_name)
-                    if os.path.exists(docker_file):
+                    if not os.path.exists(docker_file):
+                        os.makedirs(docker_file)
+                    if container_port:
                         container_port = [int(port) for port in container_port.split(',')]
-                        if request_cpu and limit_cpu and request_mem and limit_mem:
-                            if float(request_cpu) > float(limit_cpu) or float(request_mem) > float(limit_mem):
-                                raise flash('限制资源不能小于请求资源!')
-                            else:
-                                re_requests = {'cpu': request_cpu, 'memory':'%sG' %request_mem}
-                                re_limits = {'cpu': limit_cpu, 'memory':'%sG' %limit_mem}
-                        if domain and not ingress_port:
-                            raise flash('域名配置后还需配置容器对外服务端口!')
-                        redis_key = 'op_k8s_create_%s' % time.strftime('%Y%m%d%H%M%S', time.localtime())
-                        Scheduler = produce.SchedulerPublish()
-                        Scheduler = Scheduler.Scheduler_mem(k8s_resource.object_deploy, [context,project,object,version, image,
-                                                                                         run_args,container_port, ingress_port,
-                                                                                         replicas,
-                                                                                         domain,re_requests,mounts,
-                                                                                         healthcheck,sidecar,re_limits,
-                                                                                         redis_key])
-                        Scheduler.start()
-                        return render_template('deploy_show.html',redis_key=redis_key)
-                    else:
-                        flash("%s文件路径不存在!" %docker_file)
+                    if request_cpu and limit_cpu and request_mem and limit_mem:
+                        if float(request_cpu) > float(limit_cpu) or float(request_mem) > float(limit_mem):
+                            raise flash('限制资源不能小于请求资源!')
+                        else:
+                            re_requests = {'cpu': request_cpu, 'memory':'%sG' %request_mem}
+                            re_limits = {'cpu': limit_cpu, 'memory':'%sG' %limit_mem}
+                    if domain and not ingress_port:
+                        raise flash('域名配置后还需配置容器对外服务端口!')
+                    redis_key = 'op_k8s_create_%s' % time.strftime('%Y%m%d%H%M%S', time.localtime())
+                    Scheduler = produce.SchedulerPublish()
+                    Scheduler = Scheduler.Scheduler_mem(k8s_resource.object_deploy, [context,project,object,version, image,
+                                                                                     docker_args,run_args,container_port,
+                                                                                     ingress_port,replicas,
+                                                                                     domain,re_requests,mounts,labels,
+                                                                                     healthcheck,sidecar,re_limits,
+                                                                                     redis_key,g.user])
+                    Scheduler.start()
+                    return render_template('deploy_show.html',redis_key=redis_key)
                 else:
                     flash("%s包名应以.war或者.tar.gz结尾或者.jar结尾!" %object)
             else:
@@ -116,22 +126,30 @@ def deployment_create():
     return render_template('k8s_deploy.html',form=form)
 
 @page_k8s_deploy.route('/image_update',methods = ['GET','POST'])
-@user_auth.login_required(grade=1)
+@user_auth.login_required(grade=6)
 def image_update():
     try:
         tools.Async_log(g.user, request.url)
         reload(MyForm)
         form = MyForm.FormK8sUpdate()
+        db_deploy = db_op.k8s_deploy
+        rollback = False
         if form.submit.data:
             deployment = form.deployment.data
             version = form.version.data
             context = form.contexts.data
+            action = form.action.data
             if version:
-                new_image = "%s/%s:%s" %(docker_registry,deployment,version)
-                new_replicas = form.replicas.data
+                image = "%s/%s/%s:%s" % (docker_registry[context],context, deployment, version)
+                if action =='rollback':
+                    rollback = True
+                    val = db_deploy.query.filter(db_deploy.image==image).all()
+                    if not val:
+                        flash('%s版本镜像不存在!' %version)
+                        return render_template('Message.html')
                 redis_key = 'op_k8s_update_%s' % time.strftime('%Y%m%d%H%M%S', time.localtime())
                 Scheduler = produce.SchedulerPublish()
-                Scheduler = Scheduler.Scheduler_mem(k8s_resource.object_update, [context,new_image, new_replicas,version, redis_key,'web'])
+                Scheduler = Scheduler.Scheduler_mem(k8s_resource.object_update, [context,image,version,rollback,redis_key,'web',g.user])
                 Scheduler.start()
                 return render_template('deploy_show.html',redis_key=redis_key)
     except Exception as e:
@@ -230,7 +248,7 @@ def ingress_apply():
             else:
                 # 从数据库读取ingress信息
                 Rules = []
-                domain_infos = db_ingress.query.with_entities(distinct(db_ingress.domain)).all()
+                domain_infos = db_ingress.query.with_entities(distinct(db_ingress.domain)).filter(db_ingress.context==context).all()
                 domain_infos = [ domain[0] for domain in domain_infos]
                 for domain in domain_infos:
                     paths = []
@@ -250,15 +268,16 @@ def ingress_apply():
                                                                http=client.V1beta1HTTPIngressRuleValue(
                                                                    paths=paths)))
                     else:
-                        path, serviceName, servicePort = Rules_infos[0]
-                        Rules.append(client.V1beta1IngressRule(host=domain,
-                                                               http=client.V1beta1HTTPIngressRuleValue(
-                                                                   paths=[client.V1beta1HTTPIngressPath(
-                                                                       client.V1beta1IngressBackend(
-                                                                           service_name=serviceName,
-                                                                           service_port=int(servicePort)
-                                                                       ))])
-                                                               ))
+                        if Rules_infos:
+                            path, serviceName, servicePort = Rules_infos[0]
+                            Rules.append(client.V1beta1IngressRule(host=domain,
+                                                                   http=client.V1beta1HTTPIngressRuleValue(
+                                                                       paths=[client.V1beta1HTTPIngressPath(
+                                                                           client.V1beta1IngressBackend(
+                                                                               service_name=serviceName,
+                                                                               service_port=int(servicePort)
+                                                                           ))])
+                                                                   ))
                 spec = client.V1beta1IngressSpec(rules=Rules)
                 ingress = client.V1beta1Ingress(
                     api_version='extensions/v1beta1',

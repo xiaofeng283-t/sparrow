@@ -3,7 +3,6 @@ from flask import Flask,Blueprint,redirect,make_response,request,jsonify
 from module import tools,user_auth
 from xml.dom.minidom import parseString
 from collections import defaultdict
-import os
 import redis
 import time
 app = Flask(__name__)
@@ -20,11 +19,13 @@ if ENV == 'dev':
 page_logout = Blueprint('logout',__name__)
 @page_logout.route('/logout')
 def logout():
-    tm = time.strftime('%Y%m%d',time.localtime())
+    tm = time.strftime('%Y%m%d', time.localtime())
     dingId = Redis.get('OP_dingId_%s' % request.cookies.get('dingId'))
     if dingId:
         #清除用户计数
         Redis.srem('op_active_users_%s' %tm, dingId)
+    #清除用户页面菜单
+    Redis.hdel(f'op_menu_{tm}',f'menu_{dingId}')
     #清除用户票据
     ticket = Redis.get('OP_ticket_%s' % request.cookies.get('ticket'))
     Redis.delete('OP_logout_ticket_%s' % ticket)
@@ -55,6 +56,8 @@ def sso_logout():
             tm = time.strftime('%Y%m%d', time.localtime())
             dingId = Redis.get('OP_dingid_ticket_%s' % result['session_index'])
             if dingId:
+                # 清除用户页面菜单
+                Redis.hdel(f'op_menu_{tm}', f'menu_{dingId}')
                 # 清除用户计数
                 Redis.srem('op_active_users_%s' % tm, dingId)
             Redis.delete('OP_logout_ticket_%s' % result['session_index'])

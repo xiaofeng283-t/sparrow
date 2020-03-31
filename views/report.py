@@ -95,8 +95,8 @@ def resource_report():
                 RC.expire('op_web_py_vales_%s', 86400)
         except Exception as e:
             logging.error(e)
+        server_bar = Bar("近6个月新增服务器数量", title_pos='center', title_text_size=12, width='110%', height='230px')
         try:
-            server_bar = Bar("近6个月新增服务器数量", title_pos='center', title_text_size=12, width='110%', height='230px')
             attrs = sorted(set([val[0] for val in vm_vals if val] + [val[0] for val in py_vals if val]))
             vm_vals = {val[0]: val[1] for val in vm_vals}
             py_vals = {val[0]: val[1] for val in py_vals}
@@ -118,18 +118,21 @@ def resource_report():
                     xaxis_interval=0, xaxis_rotate=25, legend_pos='70%')
         except Exception as e:
             logging.error(e)
+        return render_template('resource_report.html', Bars=Bars, form=form, days=days, server_bar=server_bar)
     except Exception as e:
         logging.error(e)
         return redirect(url_for('error'))
-    return render_template('resource_report.html',Bars=Bars,form=form,days=days,server_bar=server_bar)
+
 
 @page_report.route('/server_used')
 def server_used():
     try:
+        PIES = []
+        INFOS = []
+        ATTRS = []
+        free_list = []
+        host_count = 0
         try:
-            PIES = []
-            INFOS = []
-            ATTRS = []
             if RC_CLUSTER.exists('op_zabbix_server_load_top'):
                 dict_load = eval(RC_CLUSTER.get('op_zabbix_server_load_top'))
                 bar_load = Bar("线上服务器cpu使用率TOP20", width='110%', height='100%', title_pos='center', title_text_size=14)
@@ -210,10 +213,10 @@ def server_used():
                         PIES.append(pie_project)
                 except Exception as e:
                     logging.error(e)
+        return render_template('server_used.html', INFOS=INFOS, PIES=PIES, host_count=host_count, free_list=free_list)
     except Exception as e:
         logging.error(e)
         return redirect(url_for('error'))
-    return render_template('server_used.html',INFOS=INFOS,PIES=PIES,host_count=host_count,free_list=free_list)
 
 @page_report.route('/alarm_report')
 def alarm_report():
@@ -270,6 +273,7 @@ def alarm_report():
         logging.error(e)
         return redirect(url_for('error'))
     return render_template('alarm_report.html',INFOS=INFOS,alarm_count=alarm_count)
+
 @page_report.route('/work_order_report_show')
 def work_order_report_show():
     form = MyForm.MyFormWorkOrderReport()
@@ -277,28 +281,32 @@ def work_order_report_show():
     start_time = tm.strftime('%Y-%m-%d')
     end_time = time.strftime('%Y-%m-%d', time.localtime())
     return render_template('work_order_report_show.html',form=form,tt=(start_time,end_time))
+
 @page_report.route('/work_order_report')
 @page_report.route('/work_order_report/<start_time>/<end_time>/<source>')
-def work_order_report(start_time=None,end_time=None,source=None):
+def work_order_report(start_time=None,end_time=None,source='all_order'):
     INFOS = []
     db_sso = db_op.user_sso
     db_work_order = db_op.work_order
     dm_key = 'op_work_order_report_dm'
     stat_key = 'op_work_order_report_status'
     dep_key = 'op_work_order_report_department'
-    if not source:
-        tm = datetime.datetime.now() - datetime.timedelta(days=90)
+    if not start_time or not end_time:
+        tm = datetime.datetime.now() - datetime.timedelta(days=7)
         start_time = tm.strftime('%Y-%m-%d')
         end_time = time.strftime('%Y-%m-%d',time.localtime())
-        source = 'ensure_application'
     try:
         infos = db_sso.query.with_entities(db_sso.dingunionid, db_sso.department,db_sso.realName).all()
         departments = {info[0]: info[1] for info in infos}
         users = {info[0]: info[-1] for info in infos}
         #统计运维工单状态
         try:
-            vals = db_work_order.query.with_entities(db_work_order.status,func.count(db_work_order.status)).filter(and_(
+            if source != 'all_order':
+                vals = db_work_order.query.with_entities(db_work_order.status,func.count(db_work_order.status)).filter(and_(
                 db_work_order.source == source,db_work_order.date >=start_time,db_work_order.date<=end_time)).group_by(db_work_order.status).all()
+            else:
+                vals = db_work_order.query.with_entities(db_work_order.status,func.count(db_work_order.status)).filter(and_(
+                    db_work_order.date >=start_time,db_work_order.date<=end_time)).group_by(db_work_order.status).all()
             pie = Pie("运维工单状态统计", width='100%', height='100%', title_pos='center', title_text_size=14)
             pie_vals = [val[0] for val in vals]
             pie_counts = [int(val[1]) for val in vals]
@@ -309,8 +317,12 @@ def work_order_report(start_time=None,end_time=None,source=None):
             logging.error(e)
         #统计月度工单数量及受理率
         try:
-            vals = db_work_order.query.with_entities(db_work_order.date,db_work_order.status).filter(and_(
+            if source != 'all_order':
+                vals = db_work_order.query.with_entities(db_work_order.date,db_work_order.status).filter(and_(
                 db_work_order.source == source,db_work_order.date >=start_time,db_work_order.date<=end_time)).all()
+            else:
+                vals = db_work_order.query.with_entities(db_work_order.date, db_work_order.status).filter(and_(
+                    db_work_order.date >= start_time,db_work_order.date <= end_time)).all()
             if vals:
                 for val in vals:
                     dm,status = val
@@ -336,8 +348,12 @@ def work_order_report(start_time=None,end_time=None,source=None):
             logging.error(e)
         #工单申请数量部门排名
         try:
-            vals = db_work_order.query.with_entities(db_work_order.applicant).filter(and_(
+            if source != 'all_order':
+                vals = db_work_order.query.with_entities(db_work_order.applicant).filter(and_(
                 db_work_order.source == source,db_work_order.date >=start_time,db_work_order.date<=end_time)).all()
+            else:
+                vals = db_work_order.query.with_entities(db_work_order.applicant).filter(and_(
+                db_work_order.date >=start_time,db_work_order.date<=end_time)).all()
             if vals:
                 for val in vals:
                     RC.hincrby(dep_key,departments[val[0]])
@@ -353,10 +369,15 @@ def work_order_report(start_time=None,end_time=None,source=None):
             logging.error(e)
         #工单申请数量个人排名
         try:
-            vals = db_work_order.query.with_entities(db_work_order.applicant,func.count(db_work_order.applicant)).filter(and_(
+            if source != 'all_order':
+                vals = db_work_order.query.with_entities(db_work_order.applicant,func.count(db_work_order.applicant)).filter(and_(
                 db_work_order.source == source,db_work_order.date >=start_time,db_work_order.date<=end_time)).group_by(
-                db_work_order.applicant).order_by(
-                desc(func.count(db_work_order.applicant))).limit(15).all()
+                db_work_order.applicant).order_by(desc(func.count(db_work_order.applicant))).limit(15).all()
+            else:
+                vals = db_work_order.query.with_entities(db_work_order.applicant,
+                                                         func.count(db_work_order.applicant)).filter(and_(
+                    db_work_order.date >= start_time,db_work_order.date <= end_time)).group_by(
+                    db_work_order.applicant).order_by(desc(func.count(db_work_order.applicant))).limit(15).all()
             vals = [list(val) for val in vals]
             for val in vals:
                 val[0] = users[val[0]]

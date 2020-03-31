@@ -165,13 +165,13 @@ class MyFormDeploy(Form):
         db_op.DB.session.remove()
         db_idc.DB.session.remove()
 
-class FormBusinessBigdata(Form):
+class FormData(Form):
     dms = []
     for i in range(7):
         dm = datetime.datetime.now() - datetime.timedelta(days=i)
         dm = dm.strftime('%Y-%m-%d')
         dms.append((dm,dm))
-    select_date = SelectField(choices= dms,id='business_bigdata_select_date')
+    select_date = SelectField(choices= dms,id='select_date')
 
 class FormPlatformToken(Form):
     input = StringField('input_platform', validators=[DataRequired()],id='input_platform')
@@ -209,20 +209,20 @@ class FormK8sDeploy(Form):
         db_project = db_op.project_list
         _, contexts, _ = tools.k8s_conf()
         contexts = SelectField(choices=[(context, context) for context in contexts], id='contexts')
-        projects = db_project.query.with_entities(distinct(db_project.project)).all()
-        projects = SelectField(choices=[(project[0],project[0]) for project in projects],id='projects')
+        projects = StringField('projects', validators=[DataRequired()],id='projects')
         object = StringField('object', validators=[DataRequired()],id='object')
         version = StringField('version', validators=[DataRequired()], id='version')
-        container_port = StringField('container_port', validators=[DataRequired()],id='container_port')
+        container_port = StringField('container_port',id='container_port')
         ingress_port = IntegerField('ingress_port', id='ingress_port')
         replicas = IntegerField('replicas', validators=[DataRequired()],id='replicas')
         dm_name = StringField('dm_name', validators=[DataRequired()],id='dm_name')
+        docker_args = TextAreaField( id='docker_args')
         run_args = TextAreaField(validators=[DataRequired()], id='run_args')
         healthcheck = StringField('healthcheck',id='healthcheck')
-        mount_path1 = StringField('mount_path1', id='mount_path1')
-        mount_name1 = StringField('mount_name1', id='mount_name1')
-        mount_path2 = StringField('mount_path2', id='mount_path2')
-        mount_name2 = StringField('mount_name2', id='mount_name2')
+        label_project = StringField('label_project', id='label_project')
+        label_deploy = StringField('label_deploy', id='label_deploy')
+        mount_path = StringField('mount_path', id='mount_path')
+        mount_name = StringField('mount_name', id='mount_name')
         domain = StringField('domain', id='domain')
         sidecar = StringField('sidecar', id='sidecar')
         request_cpu = IntegerField('request_cpu',id='request_cpu')
@@ -232,8 +232,6 @@ class FormK8sDeploy(Form):
         submit = SubmitField('提交', id='btn1')
     except Exception as e:
         logging.error(e)
-    finally:
-        db_op.DB.session.remove()
 
 class FormK8sUpdate(Form):
     try:
@@ -242,7 +240,7 @@ class FormK8sUpdate(Form):
         contexts = SelectField(choices=choices, id='contexts')
         deployment = SelectField(choices=[],id='deployment')
         version = SelectField(choices=[], id='version')
-        replicas = IntegerField('replicas',id='replicas')
+        action = SelectField(choices=[('update', '更新'), ('rollback', '回滚')], id='action')
         submit = SubmitField('提交', id='btn1')
     except Exception as e:
         logging.error(e)
@@ -318,6 +316,7 @@ class MyFormOtherWork(Form):
     text = TextAreaField(validators=[DataRequired()],id='text')
     choices = [('OPS开通申请', 'OPS开通申请'),
                ('VPN开通申请', 'VPN开通申请'),
+               ('后台权限申请', '后台权限申请'),
                ('大数据相关申请','大数据相关申请'),
                ('权限相关申请','权限相关申请'),
                 ('新项目部署申请', '新项目部署申请'),
@@ -339,7 +338,7 @@ class MyFormOtherWork(Form):
 class MyFormWorkOrderReport(Form):
     input = StringField('input', validators=[DataRequired()],id='input')
     input2 = StringField('input2', validators=[DataRequired()], id='input2')
-    choices = [('ensure_application','代码上线工单'),('ensure_server_auth','机器权限工单'),('ensure_sql_execute','SQL执行工单'),('ensure_project_offline','项目下线工单'),
+    choices = [('all_order','---全部工单---'),('ensure_application','代码上线工单'),('ensure_server_auth','机器权限工单'),('ensure_sql_execute','SQL执行工单'),('ensure_project_offline','项目下线工单'),
                 ('ensure_other_work','其它事项工单')]
     titles = SelectField(choices=choices, id='titles')
     submit = SubmitField('生成报告',id='btn1')

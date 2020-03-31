@@ -2,14 +2,14 @@
 from flask import Flask,make_response,render_template,render_template_string,request,g
 from flask_moment import Moment
 from flask_sqlalchemy import SQLAlchemy
-from api import ajax_api,assets_query,k8s_project_update
+from api import ajax_api,assets_query,k8s_operation
 import index,login,logout
 import time
 import ssl
 from flask_assets import Environment
 from flask_mail import Mail
 from views import chart_center,publish,deploy,k8s,k8s_deploy
-from views import sch_list,app_service,k8s_manage
+from views import sch_list,app_service, k8s_manage
 from views import business_m,report,influxdb_m
 from views import Assets,business,approval
 from views import work_order
@@ -58,7 +58,7 @@ app.register_blueprint(k8s.page_k8s)
 app.register_blueprint(work_order.page_work_order)
 app.register_blueprint(k8s_manage.page_k8s_manage)
 app.register_blueprint(k8s_deploy.page_k8s_deploy)
-app.register_blueprint(k8s_project_update.page_k8s_project_update)
+app.register_blueprint(k8s_operation.page_k8s_operation)
 produce.scheduler_tasks()
 task_run.Run()
 assets.register('js_file', conf.js_files())
@@ -82,7 +82,7 @@ def page_not_found(error):
 
 @app.errorhandler(405)
 def method_not_allowed(error):
-     resp = make_response(render_template_string("Method Not Allowed: 405 The method is not allowed for the requested URL!"),405)
+     resp = make_response(render_template_string("Method Not Allowed: 405 !"),405)
      return resp
 
 @app.route('/error')

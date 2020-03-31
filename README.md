@@ -1,10 +1,15 @@
-基于容器化的CI/CD及自动化运维管理平台,由于定制化开发的原因，使用sso方式登录验证、平台配置文件及依赖底层数据源众多，业余精力有限未进一步做通用性改造及安装文档说明.适合具有python二次开发能力的运维爱好者，别忘了给个star^_^
+基于容器化的CI/CD及自动化运维管理平台,由于定制化开发的原因，使用sso方式登录验证、平台配置文件及依赖底层数据源众多,适合具有python二次开发能力的运维爱好者.
+
+项目demo地址(因数据源不全，部分页面无法展示):http://122.51.190.191  登陆账号:guest 密码:guest
+
+别忘了给个star^_^
+
 # 开发语言与环境依赖 #
   - 编程语言：Python3.6 + HTML + JQuery
   - 前端Web框架：Bootstrap4
   - 前端图表框架：Pycharts + Datatables
   - 后端Web框架：Flask1.0+
-  - 后端Task框架：Pyscheduler
+  - 后端Task框架：apscheduler
   - 后端数据库：Mysql + Influxdb + Redis
   - 后端日志源：ElasticSearch
   - 监控数据源：zabbix
@@ -97,12 +102,16 @@
 ![show](https://github.com/wylok/opsweb/blob/master/static/images/01.jpg)
 # 资产管理
 ![show](https://github.com/wylok/opsweb/blob/master/static/images/02.jpg)
-# K8s平台管理
+# K8s管理
 ![show](https://github.com/wylok/opsweb/blob/master/static/images/6.jpg)
+![show](https://github.com/wylok/opsweb/blob/master/static/images/7.jpg)
 ![show](https://github.com/wylok/opsweb/blob/master/static/images/03.jpg)
 # 工单系统
 ![show](https://github.com/wylok/opsweb/blob/master/static/images/4.jpg)
 ![show](https://github.com/wylok/opsweb/blob/master/static/images/5.jpg)
+# 日志分析及监控报警
+![show](https://github.com/wylok/opsweb/blob/master/static/images/8.jpg)
+![show](https://github.com/wylok/opsweb/blob/master/static/images/9.jpg)
 # 问题解答： #
     - 关于sql配置文件格式问题，请参考下面示例：
       SQLALCHEMY_BINDS = {'库名': 'mysql://用户名:密码@IP地址:端口/库名?charset=utf8'}

@@ -10,7 +10,7 @@ import time
 import redis
 from sqlalchemy import and_,desc
 from flask_sqlalchemy import SQLAlchemy
-from flask import Flask
+from flask import Flask,g
 from sqlalchemy import distinct
 app = Flask(__name__)
 DB = SQLAlchemy(app)
@@ -46,7 +46,7 @@ def _flow_log(Msg):
     except Exception as e:
         logging.error(e)
 
-def download_war(object,version,run_args,redis_key):
+def download_war(object,version,docker_args,run_args,redis_key):
     #下载对应项目的最新代码包
     try:
         #包名需要规范
@@ -54,26 +54,29 @@ def download_war(object,version,run_args,redis_key):
         project_file = object
         object = object.split('.')
         dm_name = object[0]
+        package_name = object[0]
         if dm_name in Files:
             project_file = Files[dm_name]
+            package_name = project_file.split('.')[0]
         dm_type = project_file.split('.')[-1]
         if len(project_file.split('.')) >2:
             dm_type = '.'.join(project_file.split('.')[1:])
-        package = '%s-%s.%s'% (dm_name, version, dm_type)
+        package = '%s-%s.%s'% (package_name, version, dm_type)
         project_path = '%s/%s/%s' % (dockerfile_path, dm_name, project_file)
         if not os.path.exists(project_path):
             try:
                 Redis.lpush(redis_key, '%s package download from oss ......' %package)
                 _flow_log('%s package download from oss ......' %package)
                 auth = oss2.Auth(oss_id, oss_key)
-                bucket = oss2.Bucket(auth, oss_url, 'mojiops')
+                bucket = oss2.Bucket(auth, oss_url, 'ops')
                 oss_project_path = None
                 try:
                     if not os.path.exists('%s/%s' %(dockerfile_path,dm_name)):
                         os.mkdir('%s/%s' %(dockerfile_path,dm_name))
                     for obj in oss2.ObjectIterator(bucket):
                         if obj.key.endswith('.war') or obj.key.endswith('.tar.gz') or obj.key.endswith('.jar'):
-                            if obj.key.split('/')[-1].startswith(dm_name) and version in obj.key.split('/')[-1]:
+                            obj_name = obj.key.split('/')[-1].replace('_','-')
+                            if obj_name.startswith(package_name) and version in obj_name:
                                 oss_project_path = obj.key
                                 break
                 except Exception as e:
@@ -94,6 +97,8 @@ def download_war(object,version,run_args,redis_key):
                 logging.error(e)
         if os.path.exists(project_path):
             try:
+                Redis.lpush(redis_key, '检测到文件%s' % project_path)
+                _flow_log('检测到文件%s' % project_path)
                 if project_file.endswith('.tar.gz'):
                     project_file = project_file.split('.')[0]
                     os.chdir('%s/%s/' % (dockerfile_path,dm_name))
@@ -115,7 +120,15 @@ def download_war(object,version,run_args,redis_key):
                             if '<PROJECT>' in line:
                                 line = line.replace('<PROJECT>',project_file)
                             f.write('%s\n'%line)
-                #生成docker_run启动脚本文件
+                    if docker_args:
+                        for line in docker_args:
+                            f.write('%s\n' % line)
+                    for line in ("COPY ./run.sh /opt/",
+                                 "RUN chmod +x /opt/run.sh",
+                                 "ENV  LC_ALL en_US.UTF-8",
+                                 "CMD  /opt/run.sh"):
+                        f.write('%s\n' % line)
+                        #生成docker_run启动脚本文件
                 if run_args:
                     runfile = '%s/%s/run.sh' % (dockerfile_path, dm_name)
                     if os.path.exists(runfile):
@@ -199,7 +212,7 @@ def make_image(image,redis_key):
         return False
 
 class k8s_object(object):
-    def __init__(self,context,dm_name,image,container_port,replicas,mounts,healthcheck,sidecar,re_requests=None,re_limits=None):
+    def __init__(self,context,dm_name,image,container_port,replicas,mounts,labels,healthcheck,sidecar,re_requests=None,re_limits=None):
         config.load_kube_config(config_file, context=context)
         self.namespace = "default"
         self.context = context
@@ -209,6 +222,7 @@ class k8s_object(object):
         self.container_port = container_port
         self.replicas = replicas
         self.mounts = mounts
+        self.labels = labels
         self.healthcheck = healthcheck
         self.sidecar = sidecar
         self.re_requests = {'cpu':1,'memory': '2G'}
@@ -221,6 +235,9 @@ class k8s_object(object):
         volume_mounts = []
         containers = []
         volumes = []
+        ports = []
+        liveness_probe = None
+        readiness_probe = None
         volume_mounts.append(client.V1VolumeMount(mount_path='/docker/logs', name='logs'))
         volumes.append(client.V1Volume(name='logs',
                                        host_path=client.V1HostPathVolumeSource(path='/opt/logs',
@@ -231,17 +248,19 @@ class k8s_object(object):
                 volumes.append(client.V1Volume(name=self.mounts[path],
                                                host_path=client.V1HostPathVolumeSource(path=path,
                                                                                        type='DirectoryOrCreate')))
-        liveness_probe = client.V1Probe(initial_delay_seconds=15,
-                                        tcp_socket=client.V1TCPSocketAction(port=int(self.container_port[0])))
-        readiness_probe = client.V1Probe(initial_delay_seconds=15,
-                                         tcp_socket=client.V1TCPSocketAction(port=int(self.container_port[0])))
-        if self.healthcheck:
+        if self.container_port:
+            ports = [client.V1ContainerPort(container_port=int(port)) for port in self.container_port]
             liveness_probe = client.V1Probe(initial_delay_seconds=15,
-                                            http_get=client.V1HTTPGetAction(path=self.healthcheck,
-                                                                            port=int(self.container_port[0])))
+                                            tcp_socket=client.V1TCPSocketAction(port=int(self.container_port[0])))
             readiness_probe = client.V1Probe(initial_delay_seconds=15,
-                                             http_get=client.V1HTTPGetAction(path=self.healthcheck,
-                                                                             port=int(self.container_port[0])))
+                                             tcp_socket=client.V1TCPSocketAction(port=int(self.container_port[0])))
+            if self.healthcheck:
+                liveness_probe = client.V1Probe(initial_delay_seconds=15,
+                                                http_get=client.V1HTTPGetAction(path=self.healthcheck,
+                                                                                port=int(self.container_port[0])))
+                readiness_probe = client.V1Probe(initial_delay_seconds=15,
+                                                 http_get=client.V1HTTPGetAction(path=self.healthcheck,
+                                                                                 port=int(self.container_port[0])))
         Env = [client.V1EnvVar(name='LANG', value='en_US.UTF-8'),
                  client.V1EnvVar(name='LC_ALL', value='en_US.UTF-8'),
                  client.V1EnvVar(name='POD_NAME',value_from=client.V1EnvVarSource(
@@ -252,15 +271,26 @@ class k8s_object(object):
         container = client.V1Container(
             name=self.dm_name,
             image=self.image,
-            ports=[client.V1ContainerPort(container_port=int(port)) for port in self.container_port],
+            ports=ports,
             image_pull_policy='Always',
             env=Env,
             resources=client.V1ResourceRequirements(limits=self.re_limits,
                                                     requests=self.re_requests),
-            volume_mounts=volume_mounts,
-            liveness_probe=liveness_probe,
-            readiness_probe=readiness_probe
+            volume_mounts=volume_mounts
         )
+        if liveness_probe and readiness_probe:
+            container = client.V1Container(
+                name=self.dm_name,
+                image=self.image,
+                ports=ports,
+                image_pull_policy='Always',
+                env=Env,
+                resources=client.V1ResourceRequirements(limits=self.re_limits,
+                                                        requests=self.re_requests),
+                volume_mounts=volume_mounts,
+                liveness_probe=liveness_probe,
+                readiness_probe=readiness_probe
+            )
         containers.append(container)
         if self.sidecar:
             sidecar_container = client.V1Container(
@@ -274,26 +304,58 @@ class k8s_object(object):
             containers.append(sidecar_container)
         # Create and configurate a spec section
         secrets = client.V1LocalObjectReference('registrysecret')
+        preference_key = self.dm_name
+        project_values = ['']
+        host_aliases = []
+        db_docker_hosts = db_op.docker_hosts
+        values = db_docker_hosts.query.with_entities(db_docker_hosts.ip,db_docker_hosts.hostname).filter(and_(
+            db_docker_hosts.deployment==self.dm_name,db_docker_hosts.context==self.context)).all()
+        db_op.DB.session.remove()
+        if values:
+            ips = []
+            for value in values:
+                try:
+                    ip,hostname = value
+                    key = "op_docker_hosts_%s" %ip
+                    Redis.lpush(key,hostname)
+                    ips.append(ip)
+                except Exception as e:
+                    logging.error(e)
+            for ip in set(ips):
+                try:
+                    key = "op_docker_hosts_%s" % ip
+                    if Redis.exists(key):
+                        hostnames = Redis.lrange(key,0,-1)
+                        if hostnames:
+                            host_aliases.append(client.V1HostAlias(hostnames=hostnames,ip=ip))
+                    Redis.delete(key)
+                except Exception as e:
+                    logging.error(e)
+        if self.labels:
+            if 'deploy' in self.labels:
+                preference_key = self.labels['deploy']
+            if 'project' in self.labels:
+                project_values = [self.labels['project']]
         template = client.V1PodTemplateSpec(
             metadata=client.V1ObjectMeta(labels={"project": self.dm_name}),
             spec=client.V1PodSpec(containers=containers,
               image_pull_secrets=[secrets],
               volumes=volumes,
+              host_aliases = host_aliases,
               affinity=client.V1Affinity(
                   node_affinity=client.V1NodeAffinity(
                       preferred_during_scheduling_ignored_during_execution = [
                           client.V1PreferredSchedulingTerm(
                               preference=client.V1NodeSelectorTerm(
                                   match_expressions=[client.V1NodeSelectorRequirement(
-                                      key='project',
-                          operator='In',values=['moji'])
-                      ]),weight=30),
-                          client.V1PreferredSchedulingTerm(
-                              preference=client.V1NodeSelectorTerm(
-                                  match_expressions=[client.V1NodeSelectorRequirement(
-                                      key='deploy',
-                          operator='In',values=[self.dm_name])
-                      ]),weight=70)]
+                                      key=preference_key,
+                                      operator='In', values=['mark'])
+                                  ]), weight=100)],
+                      required_during_scheduling_ignored_during_execution=client.V1NodeSelector(node_selector_terms=[
+                          client.V1NodeSelectorTerm(match_expressions=[
+                              client.V1NodeSelectorRequirement(
+                                  key='project',operator='In',values=project_values)])
+                      ])
               )))
         )
         selector = client.V1LabelSelector(match_labels={"project": self.dm_name})
@@ -342,15 +404,16 @@ class k8s_object(object):
             logging.error(e)
         else:
             # 从数据库读取ingress信息
+            api_instance = client.ExtensionsV1beta1Api()
             Rules = []
-            domain_infos = db_ingress.query.with_entities(distinct(db_ingress.domain)).all()
+            domain_infos = db_ingress.query.with_entities(distinct(db_ingress.domain)).filter(db_ingress.context==self.context).all()
+            domain_infos = [domain[0] for domain in domain_infos]
             for domain in domain_infos:
                 paths = []
                 Rules_infos = db_ingress.query.with_entities(db_ingress.path,
                                                              db_ingress.serviceName, db_ingress.servicePort
-                                                             ).filter(and_(db_ingress.domain == domain[0],
-                                                                           db_ingress.context==self.context)).all()
-                Rules_infos = [domain[0] for domain in Rules_infos]
+                                                             ).filter(and_(db_ingress.domain == domain,
+                                                                           db_ingress.context == self.context)).all()
                 for infos in Rules_infos:
                     path, serviceName, servicePort = infos
                     if path:
@@ -363,23 +426,25 @@ class k8s_object(object):
                                                            http=client.V1beta1HTTPIngressRuleValue(
                                                                paths=paths)))
                 else:
-                    path, serviceName, servicePort = Rules_infos[0]
-                    Rules.append(client.V1beta1IngressRule(host=domain,
-                                                           http=client.V1beta1HTTPIngressRuleValue(
-                                                               paths=[client.V1beta1HTTPIngressPath(
-                                                                   client.V1beta1IngressBackend(
-                                                                       service_name=serviceName,
-                                                                       service_port=int(servicePort)
-                                                                   ))])
-                                                           ))
+                    if Rules_infos:
+                        path, serviceName, servicePort = Rules_infos[0]
+                        Rules.append(client.V1beta1IngressRule(host=domain,
+                                                               http=client.V1beta1HTTPIngressRuleValue(
+                                                                   paths=[client.V1beta1HTTPIngressPath(
+                                                                       client.V1beta1IngressBackend(
+                                                                           service_name=serviceName,
+                                                                           service_port=int(servicePort)
+                                                                       ))])
+                                                               ))
             spec = client.V1beta1IngressSpec(rules=Rules)
             ingress = client.V1beta1Ingress(
                 api_version='extensions/v1beta1',
                 kind='Ingress',
                 metadata=client.V1ObjectMeta(name='nginx-ingress',
                                              namespace=self.namespace,
-                                             annotations={'kubernetes.io/ingress.class': 'nginx'}),spec=spec)
-            return ingress
+                                             annotations={'kubernetes.io/ingress.class': 'nginx'}), spec=spec)
+            api_instance.patch_namespaced_ingress(body=ingress, namespace=self.namespace, name='nginx-ingress')
+            return True
         finally:
             db_op.DB.session.remove()
 
@@ -433,33 +498,34 @@ def check_pod(context,dm_name,replicas,old_pods,redis_key):
     api_instance = client.CoreV1Api()
     # 判断pod是否部署成功
     try:
-        Redis.lpush(redis_key, '进行POD运行状态检查，大约用时1分钟......')
-        _flow_log('进行POD运行状态检查，大约用时1分钟......')
+        Redis.lpush(redis_key, 'POD更新检查,大约耗时1-2分钟......')
+        _flow_log('POD更新检查,大约耗时1-2分钟......')
         phases = []
-        for t in range(4):
+        phase_count = 0
+        for t in range(12):
             ret = api_instance.list_namespaced_pod(namespace=namespace)
             if ret:
                 for i in ret.items:
                     if i.metadata.name.startswith(dm_name) and i.metadata.name not in old_pods:
-                        phase = 'unknown'
                         if i.status.container_statuses:
                             if i.status.container_statuses[-1].state.running:
                                 phase = 'Running'
                                 phases.append(phase)
-                            else:
-                                if i.status.container_statuses[-1].state.waiting:
-                                    phase = i.status.container_statuses[-1].state.waiting.reason
-                            Redis.lpush(redis_key, 'POD:%s ---->当前状态:%s' %(i.metadata.name,phase))
-                            _flow_log('POD:%s ---->当前状态:%s' %(i.metadata.name,phase))
+            if len(phases) >phase_count:
+                Redis.lpush(redis_key, 'POD已更新数量:%s' %len(phases))
+                _flow_log('POD已更新数量:%s' %len(phases))
             if len(phases) >= int(replicas):
-                Redis.lpush(redis_key, 'POD运行状态检测正常!')
-                _flow_log('POD运行状态检测正常!')
-                return True
+                break
+            phase_count = len(phases)
             phases = []
-            time.sleep(15)
+            time.sleep(10)
         if len(phases) < int(replicas):
-            Redis.lpush(redis_key, 'POD运行状态存在异常!')
-            _flow_log('POD运行状态存在异常!')
+            Redis.lpush(redis_key, 'POD更新检测异常!')
+            _flow_log('POD更新检测异常!')
+        else:
+            Redis.lpush(redis_key, 'POD更新检测正常!')
+            _flow_log('POD更新检测正常!')
+            return True
     except Exception as e:
         logging.error(e)
         _flow_log(e)
@@ -468,36 +534,43 @@ def check_pod(context,dm_name,replicas,old_pods,redis_key):
 def delete_pod(context,dm_name):
     try:
         namespace = "default"
-        config.load_kube_config(config_file,context)
-        api_instance = client.CoreV1Api()
-        ret = api_instance.list_namespaced_pod(namespace=namespace)
-        for i in ret.items:
-            if i.metadata.name.startswith(dm_name):
-                api_instance.delete_namespaced_pod(name=i.metadata.name,
-                                                   namespace=namespace,
-                                                   body=client.V1DeleteOptions())
+        if dm_name:
+            config.load_kube_config(config_file,context)
+            api_instance = client.CoreV1Api()
+            ret = api_instance.list_namespaced_pod(namespace=namespace)
+            for i in ret.items:
+                if '-'.join(i.metadata.name.split('-')[:-2]) in dm_name:
+                    api_instance.delete_namespaced_pod(name=i.metadata.name,
+                                                       namespace=namespace,
+                                                       body=client.V1DeleteOptions())
         return True
     except Exception as e:
         logging.error(e)
         return False
 
+def api_delete_pod(args):
+    try:
+        context, dm_name = args
+        delete_pod(context, dm_name)
+    except Exception as e:
+        logging.error(e)
+
 def object_deploy(args):
     try:
         namespace = "default"
-        (context,project, object, version, image, run_args, container_port, ingress_port, replicas,
-     domain, re_requests, mounts, healthcheck, sidecar, re_limits, redis_key) = args
+        (context,project, object, version, image, docker_args,run_args, container_port, ingress_port, replicas,
+     domain, re_requests, mounts,labels,healthcheck, sidecar, re_limits, redis_key,user) = args
     except Exception as e:
         logging.error(e)
     else:
         try:
-
             dm_name = object.split('.')[0]
             db_k8s = db_op.k8s_deploy
             values = db_k8s.query.filter(and_(db_k8s.image == image,db_k8s.context==context)).all()
             if values:
                 _flow_log('%s image already exists!' %image)
                 raise Redis.lpush(redis_key, '%s image already exists!' %image)
-            war = download_war(object,version,run_args,redis_key)
+            war = download_war(object,version,docker_args,run_args,redis_key)
             if war:
                 # 制作docker镜像并上传至仓库
                 if make_image(image,redis_key):
@@ -505,7 +578,8 @@ def object_deploy(args):
                     #部署deployment
                     Redis.lpush(redis_key,'start deploy deployment %s......' %dm_name)
                     _flow_log('start deploy deployment %s......' %dm_name)
-                    k8s = k8s_object(context,dm_name, image, container_port, replicas,mounts,healthcheck,sidecar,re_requests,re_limits)
+                    k8s = k8s_object(context,dm_name, image, container_port, replicas,mounts,
+                                     labels,healthcheck,sidecar,re_requests,re_limits)
                     api_instance = client.ExtensionsV1beta1Api()
                     try:
                         deployment = k8s.export_deployment()
@@ -520,73 +594,64 @@ def object_deploy(args):
                             _flow_log('......deploy deployment success!')
                             old_pods = []
                             if check_pod(context,dm_name, replicas,old_pods,redis_key):
-                                #部署service
-                                try:
-                                    Redis.lpush(redis_key, 'start deploy service %s......' % dm_name)
-                                    _flow_log('start deploy service %s......' % dm_name)
-                                    node_port = None
-                                    if ingress_port and not domain and len(container_port) == 1:
-                                        node_port = ingress_port
-                                    service = k8s.export_service(node_port)
-                                    api_instance = client.CoreV1Api()
-                                    api_instance.create_namespaced_service(body=service,namespace=namespace)
-                                except Exception as e:
-                                    logging.error(e)
-                                    # 自动删除service
-                                    k8s.delete_service()
-                                    if 'BaseException' not in str(e):
-                                        Redis.lpush(redis_key, 'fail:%s' % e)
-                                        _flow_log('fail:%s' % e)
-                                else:
-                                    #部署ingress
-                                    Redis.lpush(redis_key, '......deploy service success!')
-                                    _flow_log('......deploy service success!')
-                                    if ingress_port and domain:
-                                        api_instance = client.ExtensionsV1beta1Api()
-                                        Domains = [domain.strip() for domain in domain.split(',') if domain]
-                                        Redis.lpush(redis_key,'start deploy ingress %s......' % domain)
-                                        _flow_log('start deploy ingress %s......' % domain)
-                                        try:
-                                            ingress = k8s.export_ingress(domains=Domains,ingress_port=int(ingress_port))
-                                            if ingress:
-                                                api_instance.patch_namespaced_ingress(body=ingress,namespace=namespace,
-                                                                                    name='nginx-ingress')
-                                            else:
-                                                raise Redis.lpush(redis_key, 'deploy ingress fail')
-                                        except Exception as e:
-                                            logging.error(e)
-                                            Redis.lpush(redis_key, 'fail:%s'%e)
-                                        else:
-                                            Redis.lpush(redis_key, '......deploy ingress success!')
-                                            _flow_log('......deploy ingress success!')
-                                            #ingress信息写入数据库
-                                            db_ingress = db_op.k8s_ingress
-                                            for domain in Domains:
-                                                v = db_ingress(name='nginx-ingress',context=context,namespace=namespace,
-                                                               domain=domain,
-                                                               serviceName=dm_name,servicePort=int(ingress_port))
-                                                db_op.DB.session.add(v)
-                                                db_op.DB.session.commit()
+                                if container_port:
+                                    #部署service
                                     try:
-                                        # 部署日志记录
-                                        v = db_k8s(project=project,context=context, deployment=dm_name, image=image,war = war,
-                                                   container_port=','.join([str(port) for port in container_port]),
-                                                   replicas=replicas,
-                                                   re_requests=str(re_requests).replace("'",'"'),
-                                                   re_limits=str(re_limits).replace("'",'"'), action='create',
-                                                   update_date=time.strftime('%Y-%m-%d', time.localtime()),
-                                                   update_time=time.strftime('%H:%M:%S', time.localtime()))
-                                        db_op.DB.session.add(v)
-                                        db_op.DB.session.commit()
-                                        #记录docker启动参数
-                                        v = db_docker_run(deployment=dm_name,run_args=str(run_args),side_car=sidecar)
-                                        db_op.DB.session.add(v)
-                                        db_op.DB.session.commit()
+                                        Redis.lpush(redis_key, 'start deploy service %s......' % dm_name)
+                                        _flow_log('start deploy service %s......' % dm_name)
+                                        node_port = None
+                                        if ingress_port and not domain and len(container_port) == 1:
+                                            node_port = ingress_port
+                                        service = k8s.export_service(node_port)
+                                        api_instance = client.CoreV1Api()
+                                        api_instance.create_namespaced_service(body=service,namespace=namespace)
                                     except Exception as e:
                                         logging.error(e)
                                         if 'BaseException' not in str(e):
                                             Redis.lpush(redis_key, 'fail:%s' % e)
                                             _flow_log('fail:%s' % e)
+                                    else:
+                                        #部署ingress
+                                        Redis.lpush(redis_key, '......deploy service success!')
+                                        _flow_log('......deploy service success!')
+                                        if ingress_port and domain:
+                                            Domains = [domain]
+                                            if ',' in domain:
+                                                Domains = [domain.strip() for domain in domain.split(',') if domain]
+                                            Redis.lpush(redis_key,'start deploy ingress %s......' % domain)
+                                            _flow_log('start deploy ingress %s......' % domain)
+                                            if not k8s.export_ingress(domains=Domains,ingress_port=int(ingress_port)):
+                                                raise Redis.lpush(redis_key, 'deploy ingress fail')
+                                            else:
+                                                Redis.lpush(redis_key, '......deploy ingress success!')
+                                                _flow_log('......deploy ingress success!')
+                                try:
+                                    # 部署日志记录
+                                    if container_port:
+                                        container_port = ','.join([str(port) for port in container_port])
+                                    v = db_k8s(project=project,context=context, deployment=dm_name, image=image,war = war,
+                                               container_port=container_port,
+                                               replicas=replicas,
+                                               re_requests=str(re_requests).replace("'",'"'),
+                                               re_limits=str(re_limits).replace("'",'"'), action='create',
+                                               healthcheck=healthcheck,
+                                               update_date=time.strftime('%Y-%m-%d', time.localtime()),
+                                               update_time=time.strftime('%H:%M:%S', time.localtime()),
+                                               user=user)
+                                    db_op.DB.session.add(v)
+                                    db_op.DB.session.commit()
+                                    #记录docker启动参数
+                                    if docker_args:
+                                        docker_args = str(docker_args)
+                                    v = db_docker_run(deployment=dm_name,context=context,dockerfile=docker_args,
+                                                      run_args=str(run_args),side_car=sidecar)
+                                    db_op.DB.session.add(v)
+                                    db_op.DB.session.commit()
+                                except Exception as e:
+                                    logging.error(e)
+                                    if 'BaseException' not in str(e):
+                                        Redis.lpush(redis_key, 'fail:%s' % e)
+                                        _flow_log('fail:%s' % e)
                             else:
                                 #自动删除deployment
                                 k8s.delete_deployment()
@@ -609,101 +674,128 @@ def object_deploy(args):
 
 def object_update(args):
     try:
+        db_k8s = db_op.k8s_deploy
+        db_docker_run = db_op.docker_run
         namespace = "default"
         mounts = None
-        healthcheck= None
-        sidecar = None
-        run_args = None
         text = None
-        project = None
+        labels = None
         allcontexts = []
-        context,new_image, new_replicas,version,redis_key,channel = args
+        context,new_image,version,rollback,redis_key,channel,user = args
+        dm_name = new_image.split('/')[-1].split(':')[0]
+        # 获取已部署镜像部署信息
+        values = db_k8s.query.with_entities(db_k8s.project, db_k8s.container_port, db_k8s.image, db_k8s.war,
+                                            db_k8s.replicas, db_k8s.re_requests, db_k8s.re_limits,
+                                            db_k8s.healthcheck).filter(and_(
+            db_k8s.deployment == dm_name, db_k8s.action != 'delete')).order_by(desc(db_k8s.id)).limit(1).all()
+        project, container_port, image, war, replicas, re_requests, re_limits, healthcheck = values[0]
     except Exception as e:
         logging.error(e)
     else:
         try:
             if new_image and redis_key:
-                db_k8s = db_op.k8s_deploy
-                db_docker_run = db_op.docker_run
-                dm_name = new_image.split('/')[-1].split(':')[0]
-                #生成新镜像
-                values = db_k8s.query.with_entities(db_k8s.project, db_k8s.container_port, db_k8s.image,db_k8s.war,
-                                                    db_k8s.replicas,db_k8s.re_requests, db_k8s.re_limits).filter(and_(
-                    db_k8s.deployment == dm_name, db_k8s.action != 'delete')).order_by(desc(db_k8s.id)).limit(1).all()
-                project, container_port,image,war,replicas, re_requests, re_limits = values[0]
-                vals = db_docker_run.query.with_entities(db_docker_run.run_args,db_docker_run.side_car).filter(db_docker_run.deployment==dm_name).all()
-                if vals:
-                    run_args = eval(run_args[0][0])
-                    sidecar = eval(run_args[0][1])
-                war = download_war(dm_name,version,run_args,redis_key)
-                if not war:
-                    _flow_log("params error,update fail!")
-                    raise Redis.lpush(redis_key, "params error,update fail!")
-                if not make_image(new_image,redis_key):
-                    _flow_log("image record not exists,update fail!")
-                    raise Redis.lpush(redis_key, "image record not exists,update fail!")
                 try:
-                    re_requests = eval(re_requests)
-                    re_limits = eval(re_limits)
-                    container_port = container_port.split(',')
-                    allcontexts.append(context)
-                    if 'all-cluster' in context:
-                        allcontexts = contexts
-                    for context in allcontexts:
-                        _flow_log('start deploy %s image %s   ......' % (context,new_image))
-                        Redis.lpush(redis_key, 'start deploy %s image %s   ......' % (context,new_image))
-                        k8s = k8s_object(context,dm_name, image, container_port, replicas,mounts,healthcheck,sidecar,re_requests,re_limits)
-                        deployment = k8s.export_deployment()
-                        # Update container image
-                        deployment.spec.template.spec.containers[0].image = new_image
-                        if new_replicas:
-                            deployment.spec.replicas = int(new_replicas)
-                            replicas = new_replicas
-                        # Update the deployment
-                        try:
-                            api_instance = client.CoreV1Api()
-                            ret = api_instance.list_namespaced_pod(namespace=namespace)
-                            old_pos = [i.metadata.name for i in ret.items if i.metadata.name.startswith(dm_name)]
-                            api_instance = client.ExtensionsV1beta1Api()
-                            api_instance.patch_namespaced_deployment(name=dm_name, namespace=namespace,
-                                                                 body=deployment)
-                        except Exception as e:
-                            logging.error(e)
-                            _flow_log('deployment parameter fail!')
-                            Redis.lpush(redis_key,'deployment parameter fail!')
-                        else:
-                            _flow_log('开始进行更新后的结果验证......')
-                            Redis.lpush(redis_key, '开始进行更新后的结果验证......')
-                            if check_pod(context,dm_name, replicas,old_pos,redis_key):
-                                v = db_k8s(project=project,context=context,deployment=dm_name, image=new_image,war=war,
-                                           container_port=container_port,
-                                           replicas=replicas, re_requests=str(re_requests).replace("'", '"'),
-                                           re_limits=str(re_limits).replace("'", '"'), action='update',
-                                           update_date=time.strftime('%Y-%m-%d', time.localtime()),
-                                           update_time=time.strftime('%H:%M:%S', time.localtime()))
-                                db_op.DB.session.add(v)
-                                db_op.DB.session.commit()
-                                _flow_log('%s 镜像更新成功!' % new_image)
-                                Redis.lpush(redis_key, '%s 镜像更新成功!' % new_image)
-                                if channel == 'api':
-                                    text = ['**容器平台自动上线:**',"项目:%s" %project,"版本:%s" %version,"操作:更新成功", '**请关注业务健康状况!**']
-                            else:
-                                deployment.spec.template.spec.containers[0].image = image
-                                if image == new_image:
-                                    delete_pod(context,dm_name)
-                                api_instance = client.ExtensionsV1beta1Api()
-                                api_instance.patch_namespaced_deployment(name=dm_name, namespace=namespace,
-                                                                         body=deployment)
-                                _flow_log('%s 镜像更新失败并自动回滚!' % new_image)
-                                Redis.lpush(redis_key,'%s 镜像更新失败并自动回滚!' % new_image)
-                                if channel == 'api':
-                                    text = ['**容器平台自动上线:**',"项目:%s" %project,"版本:%s" %version,"操作:失败并回滚", '**需要手动处理!**']
+
+                    vals = db_docker_run.query.with_entities(db_docker_run.dockerfile,db_docker_run.run_args,db_docker_run.side_car).filter(and_(
+                        db_docker_run.deployment==dm_name,db_docker_run.context==context)).all()
+                    docker_args,run_args,sidecar = vals[0]
+                    if docker_args:
+                        docker_args = eval(docker_args)
+                    if run_args:
+                        run_args = eval(run_args)
                 except Exception as e:
                     logging.error(e)
-                    _flow_log( 'fail:%s' % e)
-                    Redis.lpush(redis_key, 'fail:%s' % e)
-                    if channel == 'api':
-                        text = ['**容器平台自动上线:**', "项目:%s" % project, "版本:%s" % version, "操作:更新未完成", '**需要手动处理!**']
+                else:
+                    if not rollback:
+                        war = download_war(dm_name,version,docker_args,run_args,redis_key)
+                        if not war:
+                            _flow_log("params error,update fail!")
+                            raise Redis.lpush(redis_key, "params error,update fail!")
+                        if not make_image(new_image,redis_key):
+                            _flow_log("image record not exists,update fail!")
+                            raise Redis.lpush(redis_key, "image record not exists,update fail!")
+                    try:
+                        re_requests = eval(re_requests)
+                        re_limits = eval(re_limits)
+                        allcontexts.append(context)
+                        if 'all-cluster' in context:
+                            allcontexts = contexts
+                        for context in allcontexts:
+                            _flow_log('开始更新 %s image %s   ......' % (context,new_image))
+                            Redis.lpush(redis_key, '*'*80)
+                            Redis.lpush(redis_key, '开始更新 %s image %s   ......' % (context,new_image))
+                            k8s = k8s_object(context,dm_name, image, container_port.split(','), replicas,mounts,labels,healthcheck,sidecar,re_requests,re_limits)
+                            deployment = k8s.export_deployment()
+                            # Update container image
+                            deployment.spec.template.spec.containers[0].image = new_image
+                            # Update the deployment
+                            try:
+                                api_instance = client.CoreV1Api()
+                                ret = api_instance.list_namespaced_pod(namespace=namespace)
+                                old_pos = [i.metadata.name for i in ret.items if i.metadata.name.startswith(dm_name)]
+                                api_instance = client.ExtensionsV1beta1Api()
+                                api_instance.patch_namespaced_deployment(name=dm_name, namespace=namespace,
+                                                                     body=deployment)
+                            except Exception as e:
+                                logging.error(e)
+                                _flow_log('deployment parameter fail!')
+                                Redis.lpush(redis_key,'deployment parameter fail!')
+                            else:
+                                if rollback:
+                                    action = 'rollback'
+                                    _flow_log('开始进行回滚后的结果验证......')
+                                    Redis.lpush(redis_key, '开始进行回滚后的结果验证......')
+                                else:
+                                    action = 'update'
+                                    _flow_log('开始进行更新后的结果验证......')
+                                    Redis.lpush(redis_key, '开始进行更新后的结果验证......')
+                                if check_pod(context,dm_name, replicas,old_pos,redis_key):
+                                    v = db_k8s(project=project,context=context,deployment=dm_name, image=new_image,war=war,
+                                               container_port=container_port,
+                                               replicas=replicas, re_requests=str(re_requests).replace("'", '"'),
+                                               re_limits=str(re_limits).replace("'", '"'), action=action,
+                                               healthcheck=healthcheck,
+                                               update_date=time.strftime('%Y-%m-%d', time.localtime()),
+                                               update_time=time.strftime('%H:%M:%S', time.localtime()),
+                                               user=user)
+                                    db_op.DB.session.add(v)
+                                    db_op.DB.session.commit()
+                                    if rollback:
+                                        _flow_log('%s 镜像回滚成功!' % new_image)
+                                        Redis.lpush(redis_key, '%s 镜像回滚成功!' % new_image)
+                                    else:
+                                        _flow_log('%s 镜像更新成功!' % new_image)
+                                        Redis.lpush(redis_key, '%s 镜像更新成功!' % new_image)
+                                    if channel == 'api':
+                                        if rollback:
+                                            text = ['**容器平台自动上线:**',"项目:%s" %project,"版本:%s" %version,"操作:更新成功", '**请关注业务健康状况!**']
+                                        else:
+                                            text = ['**容器平台自动回滚:**', "项目:%s" % project, "版本:%s" % version, "操作:回滚成功",
+                                                '**请关注业务健康状况!**']
+                                else:
+                                    if rollback:
+                                        _flow_log('%s 镜像回滚失败!' % new_image)
+                                        Redis.lpush(redis_key, '%s 镜像回滚失败!' % new_image)
+                                        if channel == 'api':
+                                            text = ['**容器平台自动回滚:**',"项目:%s" %project,"版本:%s" %version,"操作:回滚失败", '**需要手动处理!**']
+                                    else:
+                                        deployment.spec.template.spec.containers[0].image = image
+                                        if image == new_image:
+                                            delete_pod(context,dm_name)
+                                        api_instance = client.ExtensionsV1beta1Api()
+                                        api_instance.patch_namespaced_deployment(name=dm_name, namespace=namespace,
+                                                                                 body=deployment)
+                                        _flow_log('%s 镜像更新失败并自动回滚!' % new_image)
+                                        Redis.lpush(redis_key,'%s 镜像更新失败并自动回滚!' % new_image)
+                                        if channel == 'api':
+                                            text = ['**容器平台自动上线:**',"项目:%s" %project,"版本:%s" %version,"操作:失败并回滚", '**需要手动处理!**']
+                        Redis.lpush(redis_key, '*'*80)
+                    except Exception as e:
+                        logging.error(e)
+                        _flow_log( 'fail:%s' % e)
+                        Redis.lpush(redis_key, 'fail:%s' % e)
+                        if channel == 'api':
+                            text = ['**容器平台自动上线:**', "项目:%s" % project, "版本:%s" % version, "操作:更新未完成", '**需要手动处理!**']
         except Exception as e:
             logging.error(e)
             if 'BaseException' not in str(e):
